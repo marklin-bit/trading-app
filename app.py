@@ -7,7 +7,7 @@ import re
 # ==========================================
 # 1. 頁面設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 交易戰情室 (智能倉位版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="AI 交易戰情室 (V9 實戰版)", layout="wide", page_icon="📈")
 
 # 自訂 CSS
 st.markdown("""
@@ -17,8 +17,6 @@ st.markdown("""
     .stButton button { height: 50px; font-size: 18px; }
     div[data-testid="stMetricValue"] { font-size: 24px; }
     th { text-align: center !important; }
-    
-    /* 狀態按鈕樣式 */
     div[data-testid="stHorizontalBlock"] button { border-radius: 20px; }
 </style>
 """, unsafe_allow_html=True)
@@ -41,25 +39,23 @@ if 'history' not in st.session_state:
 if 'processed_times' not in st.session_state:
     st.session_state.processed_times = set()
 if 'position' not in st.session_state:
-    st.session_state.position = "None" # None, Long, Short
+    st.session_state.position = "None"
 
-# 定義清除輸入框的函數
 def clear_text_area():
     st.session_state["input_area"] = ""
 
 # ==========================================
 # 2. 側邊控制欄 & 倉位回報區
 # ==========================================
-st.title("📈 AI 交易決策系統 (智能倉位版)")
+st.title("📈 AI 交易決策系統 (V9 實戰版)")
 
-# --- 倉位狀態控制區 (新功能) ---
+# --- 倉位狀態控制區 ---
 st.markdown("### 🚦 您的目前倉位狀態 (請手動更新)")
 col_p1, col_p2, col_p3 = st.columns(3)
 
 def set_pos(pos):
     st.session_state.position = pos
 
-# 根據目前狀態顯示不同顏色
 btn_none_type = "primary" if st.session_state.position == "None" else "secondary"
 btn_long_type = "primary" if st.session_state.position == "Long" else "secondary"
 btn_short_type = "primary" if st.session_state.position == "Short" else "secondary"
@@ -78,7 +74,7 @@ with st.container():
     
     with col_input:
         raw_text = st.text_area(
-            "在此貼上 Excel 數據...", 
+            "在此貼上 Excel 數據 (自動修正 MA 斜率 2->-1)", 
             height=120,
             placeholder="例如: 08:45  17600  17550 ... (第1欄必須是時間)",
             key="input_area" 
@@ -129,15 +125,22 @@ if run_btn and raw_text:
                     feature_vals = [float(v) for v in vals_str[1:16]]
                 except ValueError: continue
 
-                # AI 預測
+                # --- 建立輸入資料 ---
                 row_dict = dict(zip(feature_names, feature_vals))
+                
+                # [關鍵修正]：網頁端自動校正 MA_Slope
+                # 您的 Excel 可能是 2(下)，但模型訓練是用 -1(下)
+                if row_dict['MA_Slope'] == 2:
+                    row_dict['MA_Slope'] = -1
+                
                 df_input = pd.DataFrame([row_dict])
                 
+                # --- AI 預測 ---
                 p_long = model_long.predict_proba(df_input)[0][1] * 100
                 p_short = model_short.predict_proba(df_input)[0][1] * 100
                 settlement_day = int(row_dict.get('Settlement_Day', 0))
                 
-                # --- 智能決策邏輯 (結合倉位狀態) ---
+                # --- 智能決策邏輯 ---
                 current_pos = st.session_state.position
                 
                 signal = "觀望 ✋"
@@ -145,64 +148,65 @@ if run_btn and raw_text:
                 action = "暫無建議"
                 bg_color = "#f0f2f6"
                 
-                # 1. 判斷多空訊號
-                is_long_signal = p_long > 70
-                is_short_signal = p_short > 70
+                # 門檻設定 (依據最新回測結果)
+                # 多單: >70% 進場
+                # 空單: >70% 進場, >80% 重倉
                 
-                # 2. 根據目前倉位給建議
-                if current_pos == "None": # 空手時
-                    if is_long_signal:
+                is_long = p_long > 70
+                is_short = p_short > 70
+                
+                if current_pos == "None": # 空手
+                    if is_long:
                         signal = "做多 (LONG) 🔥"
                         conf = p_long
-                        action = "進場！停損 65 點"
+                        action = "進場！預期獲利 75點+"
                         bg_color = "#fadbd8"
-                    elif is_short_signal:
+                    elif is_short:
                         prefix = "做空 (SHORT) ⚡"
                         if p_short > 80: prefix = "重倉空 (STRONG) ⚡⚡"
                         signal = prefix
                         conf = p_short
-                        action = "進場！停損 50 點"
+                        action = "進場！預期獲利 85點+"
                         bg_color = "#d5f5e3"
                     else:
-                        action = "耐心等待訊號..."
+                        action = "等待高勝率訊號..."
                 
-                elif current_pos == "Long": # 持有多單時
-                    if is_long_signal:
+                elif current_pos == "Long": # 持有多單
+                    if is_long:
                         signal = "續抱多單 (HOLD) 🔒"
                         conf = p_long
-                        action = "趨勢延續，請續抱"
+                        action = "趨勢延續中"
                         bg_color = "#fadbd8"
-                    elif is_short_signal: # 反轉訊號
+                    elif is_short: 
                         signal = "反手做空 (REVERSE) 🔄"
                         conf = p_short
-                        action = "多單出場，反手做空"
-                        bg_color = "#f5b7b1" # 深紅警戒
-                    else: # 訊號消失
+                        action = "多單停利，反手做空"
+                        bg_color = "#f5b7b1"
+                    else:
                         signal = "多單出場 (EXIT) 🚪"
                         conf = max(p_long, p_short)
-                        action = "動能減弱，建議獲利了結"
+                        action = "動能減弱，獲利了結"
                         bg_color = "#eaecee"
 
-                elif current_pos == "Short": # 持有空單時
-                    if is_short_signal:
+                elif current_pos == "Short": # 持有空單
+                    if is_short:
                         signal = "續抱空單 (HOLD) 🔒"
                         conf = p_short
-                        action = "趨勢延續，請續抱"
+                        action = "趨勢延續中"
                         bg_color = "#d5f5e3"
-                    elif is_long_signal: # 反轉訊號
+                    elif is_long: 
                         signal = "反手做多 (REVERSE) 🔄"
                         conf = p_long
-                        action = "空單出場，反手做多"
-                        bg_color = "#a9dfbf" # 深綠警戒
-                    else: # 訊號消失
+                        action = "空單停利，反手做多"
+                        bg_color = "#a9dfbf"
+                    else:
                         signal = "空單出場 (EXIT) 🚪"
                         conf = max(p_long, p_short)
-                        action = "動能減弱，建議獲利了結"
+                        action = "動能減弱，獲利了結"
                         bg_color = "#eaecee"
 
-                # 月結算日邏輯
                 if settlement_day == 2 and "進場" in action:
-                     action += " (⚠️ 月結算日小心)"
+                     action += " (⚠️ 月結算日)"
 
                 record = {
                     "K棒時間": k_time,
@@ -257,6 +261,6 @@ if not st.session_state.history.empty:
     st.dataframe(display_df.style.apply(color_rows, axis=1), use_container_width=True, hide_index=True)
     
 else:
-    st.info("👋 請先在上方選擇您的「目前倉位」，再貼上數據進行分析。")
+    st.info("👋 歡迎回來！資料校正完成，請開始貼上數據。")
 
 st.markdown("---")
