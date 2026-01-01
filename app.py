@@ -7,9 +7,8 @@ import re
 # ==========================================
 # 1. 頁面設定與模型載入
 # ==========================================
-st.set_page_config(page_title="AI 交易戰情室 (V9 實戰版)", layout="wide", page_icon="📈")
+st.set_page_config(page_title="AI 交易戰情室 (V10 修正版)", layout="wide", page_icon="📈")
 
-# 自訂 CSS
 st.markdown("""
 <style>
     .big-font { font-size:20px !important; font-weight: bold; }
@@ -40,6 +39,8 @@ if 'processed_times' not in st.session_state:
     st.session_state.processed_times = set()
 if 'position' not in st.session_state:
     st.session_state.position = "None"
+if 'last_ma20' not in st.session_state: # 用來計算斜率
+    st.session_state.last_ma20 = None
 
 def clear_text_area():
     st.session_state["input_area"] = ""
@@ -47,10 +48,9 @@ def clear_text_area():
 # ==========================================
 # 2. 側邊控制欄 & 倉位回報區
 # ==========================================
-st.title("📈 AI 交易決策系統 (V9 實戰版)")
+st.title("📈 AI 交易決策系統 (V10 最終修正版)")
 
-# --- 倉位狀態控制區 ---
-st.markdown("### 🚦 您的目前倉位狀態 (請手動更新)")
+st.markdown("### 🚦 您的目前倉位狀態")
 col_p1, col_p2, col_p3 = st.columns(3)
 
 def set_pos(pos):
@@ -74,7 +74,7 @@ with st.container():
     
     with col_input:
         raw_text = st.text_area(
-            "在此貼上 Excel 數據 (自動修正 MA 斜率 2->-1)", 
+            "在此貼上 Excel 數據 (自動重算 MA 斜率)", 
             height=120,
             placeholder="例如: 08:45  17600  17550 ... (第1欄必須是時間)",
             key="input_area" 
@@ -98,6 +98,7 @@ feature_names = [
 if clear_hist_btn:
     st.session_state.history = pd.DataFrame()
     st.session_state.processed_times = set()
+    st.session_state.last_ma20 = None
     st.rerun()
 
 if run_btn and raw_text:
@@ -125,14 +126,27 @@ if run_btn and raw_text:
                     feature_vals = [float(v) for v in vals_str[1:16]]
                 except ValueError: continue
 
-                # --- 建立輸入資料 ---
+                # --- 建立特徵 ---
                 row_dict = dict(zip(feature_names, feature_vals))
                 
-                # [關鍵修正]：網頁端自動校正 MA_Slope
-                # 您的 Excel 可能是 2(下)，但模型訓練是用 -1(下)
-                if row_dict['MA_Slope'] == 2:
-                    row_dict['MA_Slope'] = -1
+                # [關鍵修正 V10]：即時重算 MA_Slope
+                # 不依賴 Excel 貼上的值，而是依賴 MA20 的變化
+                current_ma20 = row_dict['BB_MA20']
                 
+                if st.session_state.last_ma20 is not None:
+                    if current_ma20 > st.session_state.last_ma20:
+                        row_dict['MA_Slope'] = 1  # 漲
+                    elif current_ma20 < st.session_state.last_ma20:
+                        row_dict['MA_Slope'] = -1 # 跌
+                    else:
+                        row_dict['MA_Slope'] = 0  # 平
+                
+                # 更新 last_ma20 供下一筆使用
+                st.session_state.last_ma20 = current_ma20
+                
+                # 如果是第一筆資料，沒得比較，先暫用 Excel 的值並修正格式
+                if row_dict['MA_Slope'] == 2: row_dict['MA_Slope'] = -1
+
                 df_input = pd.DataFrame([row_dict])
                 
                 # --- AI 預測 ---
@@ -140,38 +154,33 @@ if run_btn and raw_text:
                 p_short = model_short.predict_proba(df_input)[0][1] * 100
                 settlement_day = int(row_dict.get('Settlement_Day', 0))
                 
-                # --- 智能決策邏輯 ---
+                # --- 決策邏輯 ---
                 current_pos = st.session_state.position
-                
                 signal = "觀望 ✋"
                 conf = 0.0
                 action = "暫無建議"
                 bg_color = "#f0f2f6"
                 
-                # 門檻設定 (依據最新回測結果)
-                # 多單: >70% 進場
-                # 空單: >70% 進場, >80% 重倉
-                
                 is_long = p_long > 70
                 is_short = p_short > 70
                 
-                if current_pos == "None": # 空手
+                if current_pos == "None": 
                     if is_long:
                         signal = "做多 (LONG) 🔥"
                         conf = p_long
-                        action = "進場！預期獲利 75點+"
+                        action = "進場！停損 65 點"
                         bg_color = "#fadbd8"
                     elif is_short:
                         prefix = "做空 (SHORT) ⚡"
                         if p_short > 80: prefix = "重倉空 (STRONG) ⚡⚡"
                         signal = prefix
                         conf = p_short
-                        action = "進場！預期獲利 85點+"
+                        action = "進場！停損 50 點"
                         bg_color = "#d5f5e3"
                     else:
-                        action = "等待高勝率訊號..."
+                        action = "等待訊號..."
                 
-                elif current_pos == "Long": # 持有多單
+                elif current_pos == "Long": 
                     if is_long:
                         signal = "續抱多單 (HOLD) 🔒"
                         conf = p_long
@@ -188,7 +197,7 @@ if run_btn and raw_text:
                         action = "動能減弱，獲利了結"
                         bg_color = "#eaecee"
 
-                elif current_pos == "Short": # 持有空單
+                elif current_pos == "Short": 
                     if is_short:
                         signal = "續抱空單 (HOLD) 🔒"
                         conf = p_short
@@ -241,7 +250,7 @@ if run_btn and raw_text:
             st.warning(f"⚠️ 資料未更新：貼上的資料都已存在。")
 
 # ==========================================
-# 4. 顯示結果
+# 4. 顯示結果 (已隱藏 Color 欄位)
 # ==========================================
 if not st.session_state.history.empty:
     st.markdown("---")
@@ -258,9 +267,16 @@ if not st.session_state.history.empty:
         return [f'background-color: {row["Color"]}; color: black; font-weight: bold' for _ in row]
 
     display_df = st.session_state.history[['K棒時間', 'AI 訊號', '信心度', '操作建議', 'Color']]
-    st.dataframe(display_df.style.apply(color_rows, axis=1), use_container_width=True, hide_index=True)
+    
+    # 這裡用了 column_config 來隱藏 Color 欄位，解決亂碼問題
+    st.dataframe(
+        display_df.style.apply(color_rows, axis=1), 
+        use_container_width=True, 
+        hide_index=True,
+        column_config={"Color": None} 
+    )
     
 else:
-    st.info("👋 歡迎回來！資料校正完成，請開始貼上數據。")
+    st.info("👋 歡迎使用 V10 修正版！已啟用即時斜率校正，請開始貼上數據。")
 
 st.markdown("---")
